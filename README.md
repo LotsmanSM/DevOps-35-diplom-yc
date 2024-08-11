@@ -1,0 +1,1746 @@
+# Автор: Лоцман Сергей Михайлович DEVOPS-35
+
+# Дипломный практикум в Yandex.Cloud
+  * [Цели:](#цели)
+  * [Этапы выполнения:](#этапы-выполнения)
+     * [Создание облачной инфраструктуры](#создание-облачной-инфраструктуры)
+     * [Создание Kubernetes кластера](#создание-kubernetes-кластера)
+     * [Создание тестового приложения](#создание-тестового-приложения)
+     * [Подготовка cистемы мониторинга и деплой приложения](#подготовка-cистемы-мониторинга-и-деплой-приложения)
+     * [Установка и настройка CI/CD](#установка-и-настройка-cicd)
+  * [Что необходимо для сдачи задания?](#что-необходимо-для-сдачи-задания)
+  * [Как правильно задавать вопросы дипломному руководителю?](#как-правильно-задавать-вопросы-дипломному-руководителю)
+
+**Перед началом работы над дипломным заданием изучите [Инструкция по экономии облачных ресурсов](https://github.com/netology-code/devops-materials/blob/master/cloudwork.MD).**
+
+---
+## Цели:
+
+1. Подготовить облачную инфраструктуру на базе облачного провайдера Яндекс.Облако.
+2. Запустить и сконфигурировать Kubernetes кластер.
+3. Установить и настроить систему мониторинга.
+4. Настроить и автоматизировать сборку тестового приложения с использованием Docker-контейнеров.
+5. Настроить CI для автоматической сборки и тестирования.
+6. Настроить CD для автоматического развёртывания приложения.
+
+---
+## Этапы выполнения:
+
+
+### Создание облачной инфраструктуры
+
+Для начала необходимо подготовить облачную инфраструктуру в ЯО при помощи [Terraform](https://www.terraform.io/).
+
+Особенности выполнения:
+
+- Бюджет купона ограничен, что следует иметь в виду при проектировании инфраструктуры и использовании ресурсов;
+Для облачного k8s используйте региональный мастер(неотказоустойчивый). Для self-hosted k8s минимизируйте ресурсы ВМ и долю ЦПУ. В обоих вариантах используйте прерываемые ВМ для worker nodes.
+
+Предварительная подготовка к установке и запуску Kubernetes кластера.
+
+1. Создайте сервисный аккаунт, который будет в дальнейшем использоваться Terraform для работы с инфраструктурой с необходимыми и достаточными правами. Не стоит использовать права суперпользователя
+2. Подготовьте [backend](https://www.terraform.io/docs/language/settings/backends/index.html) для Terraform:  
+   а. Рекомендуемый вариант: S3 bucket в созданном ЯО аккаунте(создание бакета через TF)
+   б. Альтернативный вариант:  [Terraform Cloud](https://app.terraform.io/)  
+3. Создайте VPC с подсетями в разных зонах доступности.
+4. Убедитесь, что теперь вы можете выполнить команды `terraform destroy` и `terraform apply` без дополнительных ручных действий.
+5. В случае использования [Terraform Cloud](https://app.terraform.io/) в качестве [backend](https://www.terraform.io/docs/language/settings/backends/index.html) убедитесь, что применение изменений успешно проходит, используя web-интерфейс Terraform cloud.
+
+Ожидаемые результаты:
+
+1. Terraform сконфигурирован и создание инфраструктуры посредством Terraform возможно без дополнительных ручных действий.
+2. Полученная конфигурация инфраструктуры является предварительной, поэтому в ходе дальнейшего выполнения задания возможны изменения.
+
+### Выполнение этапа "Создание облачной инфраструктуры":
+
+1. Создам сервисный аккаунт с необходимыми правами для работы с облачной инфраструктурой:
+
+```
+# Создаем сервисный аккаунт для Terraform
+resource "yandex_iam_service_account" "service" {
+  folder_id = var.folder_id
+  name      = var.account_name
+}
+
+# Выдаем роль editor сервисному аккаунту Terraform
+resource "yandex_resourcemanager_folder_iam_member" "service_editor" {
+  folder_id = var.folder_id
+  role      = "editor"
+  member    = "serviceAccount:${yandex_iam_service_account.service.id}"
+}
+```
+
+2. Подготавливаю backend для Terraform. Использовать буду S3-bucket:
+
+```
+# Создаем статический ключ доступа для сервисного аккаунта
+resource "yandex_iam_service_account_static_access_key" "terraform_service_account_key" {
+  service_account_id = yandex_iam_service_account.service.id
+}
+
+# Используем ключ доступа для создания бакета
+resource "yandex_storage_bucket" "tf-bucket" {
+  bucket     = "lsm-diplom-bucket"
+  max_size   = 1073741824
+  access_key = yandex_iam_service_account_static_access_key.terraform_service_account_key.access_key
+  secret_key = yandex_iam_service_account_static_access_key.terraform_service_account_key.secret_key
+
+  anonymous_access_flags {
+    read = false
+    list = false
+  }
+
+  force_destroy = true
+
+provisioner "local-exec" {
+  command = "echo export ACCESS_KEY=${yandex_iam_service_account_static_access_key.terraform_service_account_key.access_key} > ../terraform/backend.tfvars"
+}
+
+provisioner "local-exec" {
+  command = "echo export SECRET_KEY=${yandex_iam_service_account_static_access_key.terraform_service_account_key.secret_key} >> ../terraform/backend.tfvars"
+}
+}
+```
+
+Инициализирую проект:
+
+```bash
+╰─➤terraform init
+
+Initializing the backend...
+
+Initializing provider plugins...
+- Finding latest version of yandex-cloud/yandex...
+- Installing yandex-cloud/yandex v0.126.0...
+- Installed yandex-cloud/yandex v0.126.0 (unauthenticated)
+
+Terraform has created a lock file .terraform.lock.hcl to record the provider
+selections it made above. Include this file in your version control repository
+so that Terraform can guarantee to make the same selections by default when
+you run "terraform init" in the future.
+
+╷
+│ Warning: Incomplete lock file information for providers
+│ 
+│ Due to your customized provider installation methods, Terraform was forced to calculate lock file checksums locally for the following providers:
+│   - yandex-cloud/yandex
+│ 
+│ The current .terraform.lock.hcl file only includes checksums for linux_amd64, so Terraform running on another platform will fail to install these providers.
+│ 
+│ To calculate additional checksums for another platform, run:
+│   terraform providers lock -platform=linux_amd64
+│ (where linux_amd64 is the platform to generate)
+╵
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+```
+
+Применю код:
+
+```bash
+╰─➤terraform apply -auto-approve
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # yandex_iam_service_account.service will be created
+  + resource "yandex_iam_service_account" "service" {
+      + created_at = (known after apply)
+      + folder_id  = "b1gl6dqee4o5qromajnb"
+      + id         = (known after apply)
+      + name       = "service"
+    }
+
+  # yandex_iam_service_account_static_access_key.terraform_service_account_key will be created
+  + resource "yandex_iam_service_account_static_access_key" "terraform_service_account_key" {
+      + access_key           = (known after apply)
+      + created_at           = (known after apply)
+      + encrypted_secret_key = (known after apply)
+      + id                   = (known after apply)
+      + key_fingerprint      = (known after apply)
+      + secret_key           = (sensitive value)
+      + service_account_id   = (known after apply)
+    }
+
+  # yandex_resourcemanager_folder_iam_member.service_editor will be created
+  + resource "yandex_resourcemanager_folder_iam_member" "service_editor" {
+      + folder_id = "b1gl6dqee4o5qromajnb"
+      + id        = (known after apply)
+      + member    = (known after apply)
+      + role      = "editor"
+    }
+
+  # yandex_storage_bucket.tf-bucket will be created
+  + resource "yandex_storage_bucket" "tf-bucket" {
+      + access_key            = (known after apply)
+      + bucket                = "lsm-diplom-bucket"
+      + bucket_domain_name    = (known after apply)
+      + default_storage_class = (known after apply)
+      + folder_id             = (known after apply)
+      + force_destroy         = true
+      + id                    = (known after apply)
+      + max_size              = 1073741824
+      + secret_key            = (sensitive value)
+      + website_domain        = (known after apply)
+      + website_endpoint      = (known after apply)
+
+      + anonymous_access_flags {
+          + list = false
+          + read = false
+        }
+    }
+
+Plan: 4 to add, 0 to change, 0 to destroy.
+yandex_iam_service_account.service: Creating...
+yandex_iam_service_account.service: Creation complete after 3s [id=aje7cftietvodb39sfn9]
+yandex_resourcemanager_folder_iam_member.service_editor: Creating...
+yandex_iam_service_account_static_access_key.terraform_service_account_key: Creating...
+yandex_iam_service_account_static_access_key.terraform_service_account_key: Creation complete after 2s [id=ajekmuv72g6k56r4kk47]
+yandex_storage_bucket.tf-bucket: Creating...
+yandex_resourcemanager_folder_iam_member.service_editor: Creation complete after 4s [id=b1gl6dqee4o5qromajnb/editor/serviceAccount:aje7cftietvodb39sfn9]
+yandex_storage_bucket.tf-bucket: Provisioning with 'local-exec'...
+yandex_storage_bucket.tf-bucket (local-exec): Executing: ["/bin/sh" "-c" "echo export AWS_ACCESS_KEY=YCAJEEzR7VH5QJ8PNDhFcsxuD > ../terraform/backend.tfvars"]
+yandex_storage_bucket.tf-bucket: Provisioning with 'local-exec'...
+yandex_storage_bucket.tf-bucket (local-exec): (output suppressed due to sensitive value in config)
+yandex_storage_bucket.tf-bucket: Creation complete after 5s [id=lsm-diplom-bucket]
+
+Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
+```
+
+В результате применения этого кода Terraform был создан сервисный аккаунт с правами для редактирования, статический ключ доступа и S3-bucket. Переменные `AWS_ACCESS_KEY` и `AWS_SECRET_KEY` будут записаны в файл `backend.tfvars`. Сделано так потому, что эти данные являются очень чувствительными и не рекомендуется их хранить в облаке. Эти переменные будут в экспортированы в оболочку рабочего окружения.
+
+Проверю, создался ли S3-bucket и сервисный аккаунт:
+
+```bash
+╰─➤yc iam service-account list
++----------------------+---------+--------+
+|          ID          |  NAME   | LABELS |
++----------------------+---------+--------+
+| aje7cftietvodb39sfn9 | service |        |
++----------------------+---------+--------+
+
+
+╰─➤yc storage bucket list
++-------------------+----------------------+------------+-----------------------+---------------------+
+|       NAME        |      FOLDER ID       |  MAX SIZE  | DEFAULT STORAGE CLASS |     CREATED AT      |
++-------------------+----------------------+------------+-----------------------+---------------------+
+| lsm-diplom-bucket | b1gl6dqee4o5qromajnb | 1073741824 | STANDARD              | 2024-08-11 16:38:28 |
++-------------------+----------------------+------------+-----------------------+---------------------+
+```
+
+Сервисный аккаунт и S3-bucket созданы.
+
+После создания S3-bucket, выполню настройку для его использования в качестве backend для Terraform. Для этого пишу следующий код:
+
+```
+terraform {
+  backend "s3" {
+    endpoint = "storage.yandexcloud.net"
+    bucket = "lsm-diplom-bucket"
+    region = "ru-central1"
+    key = "lsm-diplom-bucket/terraform.tfstate"
+    skip_region_validation = true
+    skip_credentials_validation = true
+  }
+}
+```
+Этот код настраивает Terraform на использование Yandex Cloud Storage в качестве места для хранения файла состояния `terraform.tfstate`, который содержит информацию о конфигурации и состоянии управляемых Terraform ресурсов. Чтобы код был корректно применен и Terraform успешно инициализировался, задам параметры для доступа к S3 хранилищу. Как писал выше, делать это я буду с помощью переменных окружения:
+
+```bash
+╰─➤export AWS_SECRET_KEY=YCM_9O3E5WFT8j1EbrFmRRJ1v_ibezi56MSZu7ce
+
+╰─➤export AWS_ACCESS_KEY=YCAJEEzR7VH5QJ8PNDhFcsxuD
+```
+
+3. Создаю VPC с подсетями в разных зонах доступности:
+
+```
+resource "yandex_vpc_network" "diplom" {
+  name = var.vpc_name
+}
+resource "yandex_vpc_subnet" "diplom-subnet1" {
+  name           = var.subnet1
+  zone           = var.zone1
+  network_id     = yandex_vpc_network.diplom.id
+  v4_cidr_blocks = var.cidr1
+}
+
+resource "yandex_vpc_subnet" "diplom-subnet2" {
+  name           = var.subnet2
+  zone           = var.zone2
+  network_id     = yandex_vpc_network.diplom.id
+  v4_cidr_blocks = var.cidr2
+}
+
+variable "zone1" {
+  type        = string
+  default     = "ru-central1-a"
+  description = "https://cloud.yandex.ru/docs/overview/concepts/geo-scope"
+}
+
+variable "zone2" {
+  type        = string
+  default     = "ru-central1-b"
+  description = "https://cloud.yandex.ru/docs/overview/concepts/geo-scope"
+}
+
+variable "cidr1" {
+  type        = list(string)
+  default     = ["10.0.1.0/24"]
+  description = "https://cloud.yandex.ru/docs/vpc/operations/subnet-create"
+}
+
+variable "cidr2" {
+  type        = list(string)
+  default     = ["10.0.2.0/24"]
+  description = "https://cloud.yandex.ru/docs/vpc/operations/subnet-create"
+}
+
+variable "vpc_name" {
+  type        = string
+  default     = "diplom"
+  description = "VPC network&subnet name"
+}
+
+variable "bucket_name" {
+  type        = string
+  default     = "ft-state"
+  description = "VPC network&subnet name"
+}
+
+variable "subnet1" {
+  type        = string
+  default     = "diplom-subnet1"
+  description = "subnet name"
+}
+
+variable "subnet2" {
+  type        = string
+  default     = "diplom-subnet2"
+  description = "subnet name"
+}
+```
+
+4. Описываю код Terraform для создания виртуальных машин для Kubernetes кластера. Буду использовать одну Master ноду и две Worker ноды.
+
+Инициализирую Terraform:
+
+```bash
+╰─➤terraform init
+
+Initializing the backend...
+
+Successfully configured the backend "s3"! Terraform will automatically
+use this backend unless the backend configuration changes.
+
+Initializing provider plugins...
+- Finding latest version of hashicorp/template...
+- Finding latest version of yandex-cloud/yandex...
+- Finding latest version of hashicorp/local...
+- Installing hashicorp/template v2.2.0...
+- Installed hashicorp/template v2.2.0 (unauthenticated)
+- Installing yandex-cloud/yandex v0.126.0...
+- Installed yandex-cloud/yandex v0.126.0 (unauthenticated)
+- Installing hashicorp/local v2.5.1...
+- Installed hashicorp/local v2.5.1 (unauthenticated)
+
+Terraform has created a lock file .terraform.lock.hcl to record the provider
+selections it made above. Include this file in your version control repository
+so that Terraform can guarantee to make the same selections by default when
+you run "terraform init" in the future.
+
+╷
+│ Warning: Incomplete lock file information for providers
+│ 
+│ Due to your customized provider installation methods, Terraform was forced to calculate lock file checksums locally for the following providers:
+│   - hashicorp/local
+│   - hashicorp/template
+│   - yandex-cloud/yandex
+│ 
+│ The current .terraform.lock.hcl file only includes checksums for linux_amd64, so Terraform running on another platform will fail to install these providers.
+│ 
+│ To calculate additional checksums for another platform, run:
+│   terraform providers lock -platform=linux_amd64
+│ (where linux_amd64 is the platform to generate)
+╵
+
+Terraform has been successfully initialized!
+
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.
+```
+
+Видно, что Terraform успешно инициализирован, backend с типом s3 успешно настроен. Terraform будет использовать этот backend для хранения файла состояния `terraform.tfstate`.
+
+Для проверки правильности кода, можно использовать команды `terraform validate` и `terraform plan`. В моём коде ошибок не обнаружено:
+
+```bash
+╰─➤terraform validate 
+Success! The configuration is valid.
+```
+
+Применю код для создания облачной инфраструктуры, состоящей из одной Master ноды, двух Worker нод, сети и подсети:
+
+```bash
+╰─➤terraform apply -auto-approve
+data.template_file.cloudinit: Reading...
+data.template_file.cloudinit: Read complete after 0s [id=f95b9145823e7854baf57a6dcb4d770613300f5382900a7a1abd3831abed7c6b]
+data.yandex_compute_image.ubuntu-master: Reading...
+data.yandex_compute_image.ubuntu-worker: Reading...
+data.yandex_compute_image.ubuntu-worker: Read complete after 0s [id=fd8ue2nph2v23d0rtfug]
+data.yandex_compute_image.ubuntu-master: Read complete after 0s [id=fd8ue2nph2v23d0rtfug]
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # local_file.hosts_cfg_kubespray[0] will be created
+  + resource "local_file" "hosts_cfg_kubespray" {
+      + content              = (known after apply)
+      + content_base64sha256 = (known after apply)
+      + content_base64sha512 = (known after apply)
+      + content_md5          = (known after apply)
+      + content_sha1         = (known after apply)
+      + content_sha256       = (known after apply)
+      + content_sha512       = (known after apply)
+      + directory_permission = "0777"
+      + file_permission      = "0777"
+      + filename             = "../../kubespray/inventory/mycluster/hosts.yaml"
+      + id                   = (known after apply)
+    }
+
+  # yandex_compute_instance.master[0] will be created
+  + resource "yandex_compute_instance" "master" {
+      + allow_stopping_for_update = true
+      + created_at                = (known after apply)
+      + folder_id                 = (known after apply)
+      + fqdn                      = (known after apply)
+      + gpu_cluster_id            = (known after apply)
+      + hostname                  = (known after apply)
+      + id                        = (known after apply)
+      + maintenance_grace_period  = (known after apply)
+      + maintenance_policy        = (known after apply)
+      + metadata                  = {
+          + "serial-port-enable" = "1"
+          + "ssh-keys"           = <<-EOT
+                ubuntu:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+            EOT
+          + "user-data"          = <<-EOT
+                #cloud-config
+                users:
+                  - name: ubuntu
+                    groups: sudo
+                    shell: /bin/bash
+                    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+                    ssh_authorized_keys:
+                      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+                
+                package_update: true
+                package_upgrade: false
+                packages:
+                  - mc
+                  - git
+                  - apt-transport-https
+                  - ca-certificates
+                  - curl
+                  - gnupg
+                  - lsb-release
+                  - unattended-upgrades
+                
+                runcmd:
+                  - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+                  - chmod 700 get_helm.sh
+                  - ./get_helm.sh
+            EOT
+        }
+      + name                      = "master"
+      + network_acceleration_type = "standard"
+      + platform_id               = "standard-v1"
+      + service_account_id        = (known after apply)
+      + status                    = (known after apply)
+      + zone                      = "ru-central1-a"
+
+      + boot_disk {
+          + auto_delete = true
+          + device_name = (known after apply)
+          + disk_id     = (known after apply)
+          + mode        = (known after apply)
+
+          + initialize_params {
+              + block_size  = (known after apply)
+              + description = (known after apply)
+              + image_id    = "fd8ue2nph2v23d0rtfug"
+              + name        = (known after apply)
+              + size        = 10
+              + snapshot_id = (known after apply)
+              + type        = "network-hdd"
+            }
+        }
+
+      + network_interface {
+          + index              = (known after apply)
+          + ip_address         = (known after apply)
+          + ipv4               = true
+          + ipv6               = (known after apply)
+          + ipv6_address       = (known after apply)
+          + mac_address        = (known after apply)
+          + nat                = true
+          + nat_ip_address     = (known after apply)
+          + nat_ip_version     = (known after apply)
+          + security_group_ids = (known after apply)
+          + subnet_id          = (known after apply)
+        }
+
+      + resources {
+          + core_fraction = 5
+          + cores         = 2
+          + memory        = 4
+        }
+
+      + scheduling_policy {
+          + preemptible = true
+        }
+    }
+
+  # yandex_compute_instance.worker[0] will be created
+  + resource "yandex_compute_instance" "worker" {
+      + allow_stopping_for_update = true
+      + created_at                = (known after apply)
+      + folder_id                 = (known after apply)
+      + fqdn                      = (known after apply)
+      + gpu_cluster_id            = (known after apply)
+      + hostname                  = (known after apply)
+      + id                        = (known after apply)
+      + maintenance_grace_period  = (known after apply)
+      + maintenance_policy        = (known after apply)
+      + metadata                  = {
+          + "serial-port-enable" = "1"
+          + "ssh-keys"           = <<-EOT
+                ubuntu:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+            EOT
+          + "user-data"          = <<-EOT
+                #cloud-config
+                users:
+                  - name: ubuntu
+                    groups: sudo
+                    shell: /bin/bash
+                    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+                    ssh_authorized_keys:
+                      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+                
+                package_update: true
+                package_upgrade: false
+                packages:
+                  - mc
+                  - git
+                  - apt-transport-https
+                  - ca-certificates
+                  - curl
+                  - gnupg
+                  - lsb-release
+                  - unattended-upgrades
+                
+                runcmd:
+                  - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+                  - chmod 700 get_helm.sh
+                  - ./get_helm.sh
+            EOT
+        }
+      + name                      = "worker-1"
+      + network_acceleration_type = "standard"
+      + platform_id               = "standard-v1"
+      + service_account_id        = (known after apply)
+      + status                    = (known after apply)
+      + zone                      = "ru-central1-b"
+
+      + boot_disk {
+          + auto_delete = true
+          + device_name = (known after apply)
+          + disk_id     = (known after apply)
+          + mode        = (known after apply)
+
+          + initialize_params {
+              + block_size  = (known after apply)
+              + description = (known after apply)
+              + image_id    = "fd8ue2nph2v23d0rtfug"
+              + name        = (known after apply)
+              + size        = 10
+              + snapshot_id = (known after apply)
+              + type        = "network-hdd"
+            }
+        }
+
+      + network_interface {
+          + index              = (known after apply)
+          + ip_address         = (known after apply)
+          + ipv4               = true
+          + ipv6               = (known after apply)
+          + ipv6_address       = (known after apply)
+          + mac_address        = (known after apply)
+          + nat                = true
+          + nat_ip_address     = (known after apply)
+          + nat_ip_version     = (known after apply)
+          + security_group_ids = (known after apply)
+          + subnet_id          = (known after apply)
+        }
+
+      + resources {
+          + core_fraction = 100
+          + cores         = 4
+          + memory        = 8
+        }
+
+      + scheduling_policy {
+          + preemptible = true
+        }
+    }
+
+  # yandex_compute_instance.worker[1] will be created
+  + resource "yandex_compute_instance" "worker" {
+      + allow_stopping_for_update = true
+      + created_at                = (known after apply)
+      + folder_id                 = (known after apply)
+      + fqdn                      = (known after apply)
+      + gpu_cluster_id            = (known after apply)
+      + hostname                  = (known after apply)
+      + id                        = (known after apply)
+      + maintenance_grace_period  = (known after apply)
+      + maintenance_policy        = (known after apply)
+      + metadata                  = {
+          + "serial-port-enable" = "1"
+          + "ssh-keys"           = <<-EOT
+                ubuntu:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+            EOT
+          + "user-data"          = <<-EOT
+                #cloud-config
+                users:
+                  - name: ubuntu
+                    groups: sudo
+                    shell: /bin/bash
+                    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+                    ssh_authorized_keys:
+                      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+                
+                package_update: true
+                package_upgrade: false
+                packages:
+                  - mc
+                  - git
+                  - apt-transport-https
+                  - ca-certificates
+                  - curl
+                  - gnupg
+                  - lsb-release
+                  - unattended-upgrades
+                
+                runcmd:
+                  - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+                  - chmod 700 get_helm.sh
+                  - ./get_helm.sh
+            EOT
+        }
+      + name                      = "worker-2"
+      + network_acceleration_type = "standard"
+      + platform_id               = "standard-v1"
+      + service_account_id        = (known after apply)
+      + status                    = (known after apply)
+      + zone                      = "ru-central1-b"
+
+      + boot_disk {
+          + auto_delete = true
+          + device_name = (known after apply)
+          + disk_id     = (known after apply)
+          + mode        = (known after apply)
+
+          + initialize_params {
+              + block_size  = (known after apply)
+              + description = (known after apply)
+              + image_id    = "fd8ue2nph2v23d0rtfug"
+              + name        = (known after apply)
+              + size        = 10
+              + snapshot_id = (known after apply)
+              + type        = "network-hdd"
+            }
+        }
+
+      + network_interface {
+          + index              = (known after apply)
+          + ip_address         = (known after apply)
+          + ipv4               = true
+          + ipv6               = (known after apply)
+          + ipv6_address       = (known after apply)
+          + mac_address        = (known after apply)
+          + nat                = true
+          + nat_ip_address     = (known after apply)
+          + nat_ip_version     = (known after apply)
+          + security_group_ids = (known after apply)
+          + subnet_id          = (known after apply)
+        }
+
+      + resources {
+          + core_fraction = 100
+          + cores         = 4
+          + memory        = 8
+        }
+
+      + scheduling_policy {
+          + preemptible = true
+        }
+    }
+
+  # yandex_lb_network_load_balancer.nlb-grafana will be created
+  + resource "yandex_lb_network_load_balancer" "nlb-grafana" {
+      + created_at          = (known after apply)
+      + deletion_protection = (known after apply)
+      + folder_id           = (known after apply)
+      + id                  = (known after apply)
+      + name                = "grafana"
+      + region_id           = (known after apply)
+      + type                = "external"
+
+      + attached_target_group {
+          + target_group_id = (known after apply)
+
+          + healthcheck {
+              + healthy_threshold   = 2
+              + interval            = 2
+              + name                = "healthcheck"
+              + timeout             = 1
+              + unhealthy_threshold = 2
+
+              + tcp_options {
+                  + port = 30050
+                }
+            }
+        }
+
+      + listener {
+          + name        = "grafana-listener"
+          + port        = 3000
+          + protocol    = (known after apply)
+          + target_port = 30050
+
+          + external_address_spec {
+              + address    = (known after apply)
+              + ip_version = "ipv4"
+            }
+        }
+    }
+
+  # yandex_lb_network_load_balancer.nlb-web-app will be created
+  + resource "yandex_lb_network_load_balancer" "nlb-web-app" {
+      + created_at          = (known after apply)
+      + deletion_protection = (known after apply)
+      + folder_id           = (known after apply)
+      + id                  = (known after apply)
+      + name                = "web-app"
+      + region_id           = (known after apply)
+      + type                = "external"
+
+      + attached_target_group {
+          + target_group_id = (known after apply)
+
+          + healthcheck {
+              + healthy_threshold   = 2
+              + interval            = 2
+              + name                = "healthcheck"
+              + timeout             = 1
+              + unhealthy_threshold = 2
+
+              + tcp_options {
+                  + port = 30051
+                }
+            }
+        }
+
+      + listener {
+          + name        = "web-app-listener"
+          + port        = 80
+          + protocol    = (known after apply)
+          + target_port = 30051
+
+          + external_address_spec {
+              + address    = (known after apply)
+              + ip_version = "ipv4"
+            }
+        }
+    }
+
+  # yandex_lb_target_group.balancer-group will be created
+  + resource "yandex_lb_target_group" "balancer-group" {
+      + created_at = (known after apply)
+      + folder_id  = (known after apply)
+      + id         = (known after apply)
+      + name       = "balancer-group"
+      + region_id  = (known after apply)
+
+      + target {
+          + address   = (known after apply)
+          + subnet_id = (known after apply)
+        }
+      + target {
+          + address   = (known after apply)
+          + subnet_id = (known after apply)
+        }
+    }
+
+  # yandex_vpc_network.diplom will be created
+  + resource "yandex_vpc_network" "diplom" {
+      + created_at                = (known after apply)
+      + default_security_group_id = (known after apply)
+      + folder_id                 = (known after apply)
+      + id                        = (known after apply)
+      + labels                    = (known after apply)
+      + name                      = "diplom"
+      + subnet_ids                = (known after apply)
+    }
+
+  # yandex_vpc_subnet.diplom-subnet1 will be created
+  + resource "yandex_vpc_subnet" "diplom-subnet1" {
+      + created_at     = (known after apply)
+      + folder_id      = (known after apply)
+      + id             = (known after apply)
+      + labels         = (known after apply)
+      + name           = "diplom-subnet1"
+      + network_id     = (known after apply)
+      + v4_cidr_blocks = [
+          + "10.0.1.0/24",
+        ]
+      + v6_cidr_blocks = (known after apply)
+      + zone           = "ru-central1-a"
+    }
+
+  # yandex_vpc_subnet.diplom-subnet2 will be created
+  + resource "yandex_vpc_subnet" "diplom-subnet2" {
+      + created_at     = (known after apply)
+      + folder_id      = (known after apply)
+      + id             = (known after apply)
+      + labels         = (known after apply)
+      + name           = "diplom-subnet2"
+      + network_id     = (known after apply)
+      + v4_cidr_blocks = [
+          + "10.0.2.0/24",
+        ]
+      + v6_cidr_blocks = (known after apply)
+      + zone           = "ru-central1-b"
+    }
+
+Plan: 10 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + Grafana_Network_Load_Balancer_Address = [
+      + (known after apply),
+    ]
+  + Web_App_Network_Load_Balancer_Address = [
+      + (known after apply),
+    ]
+  + all_vms                               = [
+      + {
+          + ip_external = (known after apply)
+          + ip_internal = (known after apply)
+          + name        = "master"
+        },
+      + {
+          + ip_external = (known after apply)
+          + ip_internal = (known after apply)
+          + name        = "worker-1"
+        },
+      + {
+          + ip_external = (known after apply)
+          + ip_internal = (known after apply)
+          + name        = "worker-2"
+        },
+    ]
+yandex_vpc_network.diplom: Creating...
+yandex_vpc_network.diplom: Creation complete after 2s [id=enpgdackc84gpe6dko81]
+yandex_vpc_subnet.diplom-subnet1: Creating...
+yandex_vpc_subnet.diplom-subnet2: Creating...
+yandex_vpc_subnet.diplom-subnet2: Creation complete after 0s [id=e2lkraib7m57t0n5v1o2]
+yandex_vpc_subnet.diplom-subnet1: Creation complete after 1s [id=e9bhtdi3o5p8h9fj00dc]
+yandex_compute_instance.master[0]: Creating...
+yandex_compute_instance.master[0]: Still creating... [10s elapsed]
+yandex_compute_instance.master[0]: Still creating... [20s elapsed]
+yandex_compute_instance.master[0]: Still creating... [30s elapsed]
+yandex_compute_instance.master[0]: Still creating... [40s elapsed]
+yandex_compute_instance.master[0]: Still creating... [50s elapsed]
+yandex_compute_instance.master[0]: Still creating... [1m0s elapsed]
+yandex_compute_instance.master[0]: Creation complete after 1m0s [id=fhm4du4coc4ft6u1b175]
+yandex_compute_instance.worker[1]: Creating...
+yandex_compute_instance.worker[0]: Creating...
+yandex_compute_instance.worker[0]: Still creating... [10s elapsed]
+yandex_compute_instance.worker[1]: Still creating... [10s elapsed]
+yandex_compute_instance.worker[1]: Still creating... [20s elapsed]
+yandex_compute_instance.worker[0]: Still creating... [20s elapsed]
+yandex_compute_instance.worker[0]: Still creating... [30s elapsed]
+yandex_compute_instance.worker[1]: Still creating... [30s elapsed]
+yandex_compute_instance.worker[0]: Still creating... [40s elapsed]
+yandex_compute_instance.worker[1]: Still creating... [40s elapsed]
+yandex_compute_instance.worker[0]: Creation complete after 40s [id=epdl2m039p4qcjrqmqlt]
+yandex_compute_instance.worker[1]: Creation complete after 40s [id=epdmqkgkg6a9obv8u841]
+yandex_lb_target_group.balancer-group: Creating...
+local_file.hosts_cfg_kubespray[0]: Creating...
+local_file.hosts_cfg_kubespray[0]: Creation complete after 0s [id=4c379cd508367c473a801dd25f3afeb7bfbc2918]
+yandex_lb_target_group.balancer-group: Creation complete after 2s [id=enpufkghtkgb4m91pjka]
+yandex_lb_network_load_balancer.nlb-grafana: Creating...
+yandex_lb_network_load_balancer.nlb-grafana: Creation complete after 3s [id=enplhaiut18jk9tl6kva]
+yandex_lb_network_load_balancer.nlb-web-app: Creating...
+yandex_lb_network_load_balancer.nlb-web-app: Creation complete after 3s [id=enpoak8qmkog1esob5n2]
+
+Apply complete! Resources: 10 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+Grafana_Network_Load_Balancer_Address = tolist([
+  "51.250.34.196",
+])
+Web_App_Network_Load_Balancer_Address = tolist([
+  "51.250.43.205",
+])
+all_vms = [
+  {
+    "ip_external" = "89.169.130.245"
+    "ip_internal" = "10.0.1.13"
+    "name" = "master"
+  },
+  {
+    "ip_external" = "89.169.160.6"
+    "ip_internal" = "10.0.2.31"
+    "name" = "worker-1"
+  },
+  {
+    "ip_external" = "89.169.162.145"
+    "ip_internal" = "10.0.2.17"
+    "name" = "worker-2"
+  },
+]
+```
+
+Кроме создания сети, подсетей и виртуальных машин, создается ресурс из файла `ansible.tf`, который по шаблону `hosts.tftpl` создает inventory файл. Этот inventory файл в дальнейшем будет использоваться для развёртывания Kubernetes кластера из репозитория Kubespray.
+
+Также при развёртывании виртуальных машин буду использовать файл `cloud-init.yml`, который установит на них полезные в дальнейшем пакеты. Например, curl, Git, MC, atop и другие.
+
+Код для создания Master ноды находится в файле [master.tf](terraform/master.tf)
+
+Код для создания Worker нод находится в файле [worker.tf](terraform/worker.tf)
+
+Код для установки необходимых пакетов на виртуальные машины при их развертывании находится в файле [cloud-init.yml](terraform/cloud-init.yml)
+
+Проверю, создались ли виртуальные машины:
+
+```bash
+╰─➤yc compute instance list
++----------------------+----------+---------------+---------+----------------+-------------+
+|          ID          |   NAME   |    ZONE ID    | STATUS  |  EXTERNAL IP   | INTERNAL IP |
++----------------------+----------+---------------+---------+----------------+-------------+
+| epdl2m039p4qcjrqmqlt | worker-1 | ru-central1-b | RUNNING | 89.169.160.6   | 10.0.2.31   |
+| epdmqkgkg6a9obv8u841 | worker-2 | ru-central1-b | RUNNING | 89.169.162.145 | 10.0.2.17   |
+| fhm4du4coc4ft6u1b175 | master   | ru-central1-a | RUNNING | 89.169.130.245 | 10.0.1.13   |
++----------------------+----------+---------------+---------+----------------+-------------+
+```
+
+Виртуальные машины созданы в разных подсетях и разных зонах доступности.
+
+Также проверю все созданные ресурсы через графический интерфейс:
+
+* Сервисный аккаунт:
+
+![img01_service.png](img/img01_service.png)
+
+* S3-bucket:
+
+![img02_bucket.png](img/img02_bucket.png)
+
+* Сеть и подсети:
+
+![img03_network.png](img/img03_network.png)
+
+* Виртуальные машины:
+
+![img04_vm.png](img/img04_vm.png)
+
+Проверю удаление созданных ресурсов. Удалю созданные виртуальные машины, сеть, подсети:
+
+```bash
+╰─➤terraform destroy -auto-approve
+data.template_file.cloudinit: Reading...
+data.template_file.cloudinit: Read complete after 0s [id=f95b9145823e7854baf57a6dcb4d770613300f5382900a7a1abd3831abed7c6b]
+data.yandex_compute_image.ubuntu-master: Reading...
+data.yandex_compute_image.ubuntu-worker: Reading...
+yandex_vpc_network.diplom: Refreshing state... [id=enpgdackc84gpe6dko81]
+data.yandex_compute_image.ubuntu-master: Read complete after 0s [id=fd8ue2nph2v23d0rtfug]
+data.yandex_compute_image.ubuntu-worker: Read complete after 0s [id=fd8ue2nph2v23d0rtfug]
+yandex_vpc_subnet.diplom-subnet2: Refreshing state... [id=e2lkraib7m57t0n5v1o2]
+yandex_vpc_subnet.diplom-subnet1: Refreshing state... [id=e9bhtdi3o5p8h9fj00dc]
+yandex_compute_instance.master[0]: Refreshing state... [id=fhm4du4coc4ft6u1b175]
+yandex_compute_instance.worker[0]: Refreshing state... [id=epdl2m039p4qcjrqmqlt]
+yandex_compute_instance.worker[1]: Refreshing state... [id=epdmqkgkg6a9obv8u841]
+yandex_lb_target_group.balancer-group: Refreshing state... [id=enpufkghtkgb4m91pjka]
+local_file.hosts_cfg_kubespray[0]: Refreshing state... [id=4c379cd508367c473a801dd25f3afeb7bfbc2918]
+yandex_lb_network_load_balancer.nlb-grafana: Refreshing state... [id=enplhaiut18jk9tl6kva]
+yandex_lb_network_load_balancer.nlb-web-app: Refreshing state... [id=enpoak8qmkog1esob5n2]
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  - destroy
+
+Terraform will perform the following actions:
+
+  # local_file.hosts_cfg_kubespray[0] will be destroyed
+  - resource "local_file" "hosts_cfg_kubespray" {
+      - content              = <<-EOT
+            all:
+              hosts:
+                master:
+                  ansible_host: 89.169.130.245
+                  ip: 10.0.1.13
+                  access_ip: 89.169.130.245
+                worker-1:
+                  ansible_host: 89.169.160.6
+                  ip: 10.0.2.31
+                  access_ip: 89.169.160.6
+                worker-2:
+                  ansible_host: 89.169.162.145
+                  ip: 10.0.2.17
+                  access_ip: 89.169.162.145
+              children:
+                kube_control_plane:
+                  hosts:
+                    master:
+                kube_node:
+                  hosts:
+                    worker-1:
+                    worker-2:
+                etcd:
+                  hosts:
+                    master:
+                k8s_cluster:
+                  children:
+                    kube_control_plane:
+                    kube_node:
+                calico_rr:
+                  hosts: {}
+        EOT -> null
+      - content_base64sha256 = "Qqpz+ctFfeGf77FSeM4TvC9PWC47eciUMKQBpvdlsjw=" -> null
+      - content_base64sha512 = "phvFt7jSvSiPSXTyIC8N+NwVhkkxYmvnefS5/wvEa6bIEPU8tGnIAzVVSGAuir3knLhUqqAJXD7y5s12V8rOxA==" -> null
+      - content_md5          = "4b0afc1c08f0f381162ea514bcc7ba71" -> null
+      - content_sha1         = "4c379cd508367c473a801dd25f3afeb7bfbc2918" -> null
+      - content_sha256       = "42aa73f9cb457de19fefb15278ce13bc2f4f582e3b79c89430a401a6f765b23c" -> null
+      - content_sha512       = "a61bc5b7b8d2bd288f4974f2202f0df8dc15864931626be779f4b9ff0bc46ba6c810f53cb469c803355548602e8abde49cb854aaa0095c3ef2e6cd7657cacec4" -> null
+      - directory_permission = "0777" -> null
+      - file_permission      = "0777" -> null
+      - filename             = "../../kubespray/inventory/mycluster/hosts.yaml" -> null
+      - id                   = "4c379cd508367c473a801dd25f3afeb7bfbc2918" -> null
+    }
+
+  # yandex_compute_instance.master[0] will be destroyed
+  - resource "yandex_compute_instance" "master" {
+      - allow_stopping_for_update = true -> null
+      - created_at                = "2024-08-11T16:46:29Z" -> null
+      - folder_id                 = "b1gl6dqee4o5qromajnb" -> null
+      - fqdn                      = "fhm4du4coc4ft6u1b175.auto.internal" -> null
+      - id                        = "fhm4du4coc4ft6u1b175" -> null
+      - labels                    = {} -> null
+      - metadata                  = {
+          - "serial-port-enable" = "1"
+          - "ssh-keys"           = <<-EOT
+                ubuntu:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+            EOT
+          - "user-data"          = <<-EOT
+                #cloud-config
+                users:
+                  - name: ubuntu
+                    groups: sudo
+                    shell: /bin/bash
+                    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+                    ssh_authorized_keys:
+                      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+                
+                package_update: true
+                package_upgrade: false
+                packages:
+                  - mc
+                  - git
+                  - apt-transport-https
+                  - ca-certificates
+                  - curl
+                  - gnupg
+                  - lsb-release
+                  - unattended-upgrades
+                
+                runcmd:
+                  - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+                  - chmod 700 get_helm.sh
+                  - ./get_helm.sh
+            EOT
+        } -> null
+      - name                      = "master" -> null
+      - network_acceleration_type = "standard" -> null
+      - platform_id               = "standard-v1" -> null
+      - status                    = "running" -> null
+      - zone                      = "ru-central1-a" -> null
+
+      - boot_disk {
+          - auto_delete = true -> null
+          - device_name = "fhmq4cgl8vvje7gr7035" -> null
+          - disk_id     = "fhmq4cgl8vvje7gr7035" -> null
+          - mode        = "READ_WRITE" -> null
+
+          - initialize_params {
+              - block_size = 4096 -> null
+              - image_id   = "fd8ue2nph2v23d0rtfug" -> null
+              - size       = 10 -> null
+              - type       = "network-hdd" -> null
+            }
+        }
+
+      - metadata_options {
+          - aws_v1_http_endpoint = 1 -> null
+          - aws_v1_http_token    = 2 -> null
+          - gce_http_endpoint    = 1 -> null
+          - gce_http_token       = 1 -> null
+        }
+
+      - network_interface {
+          - index              = 0 -> null
+          - ip_address         = "10.0.1.13" -> null
+          - ipv4               = true -> null
+          - ipv6               = false -> null
+          - mac_address        = "d0:0d:46:f8:8c:c3" -> null
+          - nat                = true -> null
+          - nat_ip_address     = "89.169.130.245" -> null
+          - nat_ip_version     = "IPV4" -> null
+          - security_group_ids = [] -> null
+          - subnet_id          = "e9bhtdi3o5p8h9fj00dc" -> null
+        }
+
+      - placement_policy {
+          - host_affinity_rules       = [] -> null
+          - placement_group_partition = 0 -> null
+        }
+
+      - resources {
+          - core_fraction = 5 -> null
+          - cores         = 2 -> null
+          - gpus          = 0 -> null
+          - memory        = 4 -> null
+        }
+
+      - scheduling_policy {
+          - preemptible = true -> null
+        }
+    }
+
+  # yandex_compute_instance.worker[0] will be destroyed
+  - resource "yandex_compute_instance" "worker" {
+      - allow_stopping_for_update = true -> null
+      - created_at                = "2024-08-11T16:47:29Z" -> null
+      - folder_id                 = "b1gl6dqee4o5qromajnb" -> null
+      - fqdn                      = "epdl2m039p4qcjrqmqlt.auto.internal" -> null
+      - id                        = "epdl2m039p4qcjrqmqlt" -> null
+      - labels                    = {} -> null
+      - metadata                  = {
+          - "serial-port-enable" = "1"
+          - "ssh-keys"           = <<-EOT
+                ubuntu:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+            EOT
+          - "user-data"          = <<-EOT
+                #cloud-config
+                users:
+                  - name: ubuntu
+                    groups: sudo
+                    shell: /bin/bash
+                    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+                    ssh_authorized_keys:
+                      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+                
+                package_update: true
+                package_upgrade: false
+                packages:
+                  - mc
+                  - git
+                  - apt-transport-https
+                  - ca-certificates
+                  - curl
+                  - gnupg
+                  - lsb-release
+                  - unattended-upgrades
+                
+                runcmd:
+                  - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+                  - chmod 700 get_helm.sh
+                  - ./get_helm.sh
+            EOT
+        } -> null
+      - name                      = "worker-1" -> null
+      - network_acceleration_type = "standard" -> null
+      - platform_id               = "standard-v1" -> null
+      - status                    = "running" -> null
+      - zone                      = "ru-central1-b" -> null
+
+      - boot_disk {
+          - auto_delete = true -> null
+          - device_name = "epdps3o1t53bi4mcute7" -> null
+          - disk_id     = "epdps3o1t53bi4mcute7" -> null
+          - mode        = "READ_WRITE" -> null
+
+          - initialize_params {
+              - block_size = 4096 -> null
+              - image_id   = "fd8ue2nph2v23d0rtfug" -> null
+              - size       = 10 -> null
+              - type       = "network-hdd" -> null
+            }
+        }
+
+      - metadata_options {
+          - aws_v1_http_endpoint = 1 -> null
+          - aws_v1_http_token    = 2 -> null
+          - gce_http_endpoint    = 1 -> null
+          - gce_http_token       = 1 -> null
+        }
+
+      - network_interface {
+          - index              = 0 -> null
+          - ip_address         = "10.0.2.31" -> null
+          - ipv4               = true -> null
+          - ipv6               = false -> null
+          - mac_address        = "d0:0d:15:15:80:34" -> null
+          - nat                = true -> null
+          - nat_ip_address     = "89.169.160.6" -> null
+          - nat_ip_version     = "IPV4" -> null
+          - security_group_ids = [] -> null
+          - subnet_id          = "e2lkraib7m57t0n5v1o2" -> null
+        }
+
+      - placement_policy {
+          - host_affinity_rules       = [] -> null
+          - placement_group_partition = 0 -> null
+        }
+
+      - resources {
+          - core_fraction = 100 -> null
+          - cores         = 4 -> null
+          - gpus          = 0 -> null
+          - memory        = 8 -> null
+        }
+
+      - scheduling_policy {
+          - preemptible = true -> null
+        }
+    }
+
+  # yandex_compute_instance.worker[1] will be destroyed
+  - resource "yandex_compute_instance" "worker" {
+      - allow_stopping_for_update = true -> null
+      - created_at                = "2024-08-11T16:47:29Z" -> null
+      - folder_id                 = "b1gl6dqee4o5qromajnb" -> null
+      - fqdn                      = "epdmqkgkg6a9obv8u841.auto.internal" -> null
+      - id                        = "epdmqkgkg6a9obv8u841" -> null
+      - labels                    = {} -> null
+      - metadata                  = {
+          - "serial-port-enable" = "1"
+          - "ssh-keys"           = <<-EOT
+                ubuntu:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+            EOT
+          - "user-data"          = <<-EOT
+                #cloud-config
+                users:
+                  - name: ubuntu
+                    groups: sudo
+                    shell: /bin/bash
+                    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+                    ssh_authorized_keys:
+                      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5/crtWIqG261tg/WA/bbDS3XWFJS8McPXaHDnrP6S LotsmanSM@mail.ru
+                
+                package_update: true
+                package_upgrade: false
+                packages:
+                  - mc
+                  - git
+                  - apt-transport-https
+                  - ca-certificates
+                  - curl
+                  - gnupg
+                  - lsb-release
+                  - unattended-upgrades
+                
+                runcmd:
+                  - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+                  - chmod 700 get_helm.sh
+                  - ./get_helm.sh
+            EOT
+        } -> null
+      - name                      = "worker-2" -> null
+      - network_acceleration_type = "standard" -> null
+      - platform_id               = "standard-v1" -> null
+      - status                    = "running" -> null
+      - zone                      = "ru-central1-b" -> null
+
+      - boot_disk {
+          - auto_delete = true -> null
+          - device_name = "epdhv5vuj5rf61cs31tq" -> null
+          - disk_id     = "epdhv5vuj5rf61cs31tq" -> null
+          - mode        = "READ_WRITE" -> null
+
+          - initialize_params {
+              - block_size = 4096 -> null
+              - image_id   = "fd8ue2nph2v23d0rtfug" -> null
+              - size       = 10 -> null
+              - type       = "network-hdd" -> null
+            }
+        }
+
+      - metadata_options {
+          - aws_v1_http_endpoint = 1 -> null
+          - aws_v1_http_token    = 2 -> null
+          - gce_http_endpoint    = 1 -> null
+          - gce_http_token       = 1 -> null
+        }
+
+      - network_interface {
+          - index              = 0 -> null
+          - ip_address         = "10.0.2.17" -> null
+          - ipv4               = true -> null
+          - ipv6               = false -> null
+          - mac_address        = "d0:0d:16:d5:21:48" -> null
+          - nat                = true -> null
+          - nat_ip_address     = "89.169.162.145" -> null
+          - nat_ip_version     = "IPV4" -> null
+          - security_group_ids = [] -> null
+          - subnet_id          = "e2lkraib7m57t0n5v1o2" -> null
+        }
+
+      - placement_policy {
+          - host_affinity_rules       = [] -> null
+          - placement_group_partition = 0 -> null
+        }
+
+      - resources {
+          - core_fraction = 100 -> null
+          - cores         = 4 -> null
+          - gpus          = 0 -> null
+          - memory        = 8 -> null
+        }
+
+      - scheduling_policy {
+          - preemptible = true -> null
+        }
+    }
+
+  # yandex_lb_network_load_balancer.nlb-grafana will be destroyed
+  - resource "yandex_lb_network_load_balancer" "nlb-grafana" {
+      - created_at          = "2024-08-11T16:48:11Z" -> null
+      - deletion_protection = false -> null
+      - folder_id           = "b1gl6dqee4o5qromajnb" -> null
+      - id                  = "enplhaiut18jk9tl6kva" -> null
+      - labels              = {} -> null
+      - name                = "grafana" -> null
+      - region_id           = "ru-central1" -> null
+      - type                = "external" -> null
+
+      - attached_target_group {
+          - target_group_id = "enpufkghtkgb4m91pjka" -> null
+
+          - healthcheck {
+              - healthy_threshold   = 2 -> null
+              - interval            = 2 -> null
+              - name                = "healthcheck" -> null
+              - timeout             = 1 -> null
+              - unhealthy_threshold = 2 -> null
+
+              - tcp_options {
+                  - port = 30050 -> null
+                }
+            }
+        }
+
+      - listener {
+          - name        = "grafana-listener" -> null
+          - port        = 3000 -> null
+          - protocol    = "tcp" -> null
+          - target_port = 30050 -> null
+
+          - external_address_spec {
+              - address    = "51.250.34.196" -> null
+              - ip_version = "ipv4" -> null
+            }
+        }
+    }
+
+  # yandex_lb_network_load_balancer.nlb-web-app will be destroyed
+  - resource "yandex_lb_network_load_balancer" "nlb-web-app" {
+      - created_at          = "2024-08-11T16:48:14Z" -> null
+      - deletion_protection = false -> null
+      - folder_id           = "b1gl6dqee4o5qromajnb" -> null
+      - id                  = "enpoak8qmkog1esob5n2" -> null
+      - labels              = {} -> null
+      - name                = "web-app" -> null
+      - region_id           = "ru-central1" -> null
+      - type                = "external" -> null
+
+      - attached_target_group {
+          - target_group_id = "enpufkghtkgb4m91pjka" -> null
+
+          - healthcheck {
+              - healthy_threshold   = 2 -> null
+              - interval            = 2 -> null
+              - name                = "healthcheck" -> null
+              - timeout             = 1 -> null
+              - unhealthy_threshold = 2 -> null
+
+              - tcp_options {
+                  - port = 30051 -> null
+                }
+            }
+        }
+
+      - listener {
+          - name        = "web-app-listener" -> null
+          - port        = 80 -> null
+          - protocol    = "tcp" -> null
+          - target_port = 30051 -> null
+
+          - external_address_spec {
+              - address    = "51.250.43.205" -> null
+              - ip_version = "ipv4" -> null
+            }
+        }
+    }
+
+  # yandex_lb_target_group.balancer-group will be destroyed
+  - resource "yandex_lb_target_group" "balancer-group" {
+      - created_at = "2024-08-11T16:48:09Z" -> null
+      - folder_id  = "b1gl6dqee4o5qromajnb" -> null
+      - id         = "enpufkghtkgb4m91pjka" -> null
+      - labels     = {} -> null
+      - name       = "balancer-group" -> null
+      - region_id  = "ru-central1" -> null
+
+      - target {
+          - address   = "10.0.2.17" -> null
+          - subnet_id = "e2lkraib7m57t0n5v1o2" -> null
+        }
+      - target {
+          - address   = "10.0.2.31" -> null
+          - subnet_id = "e2lkraib7m57t0n5v1o2" -> null
+        }
+    }
+
+  # yandex_vpc_network.diplom will be destroyed
+  - resource "yandex_vpc_network" "diplom" {
+      - created_at                = "2024-08-11T16:46:25Z" -> null
+      - default_security_group_id = "enpa7v55rqdeh5j6j9bc" -> null
+      - folder_id                 = "b1gl6dqee4o5qromajnb" -> null
+      - id                        = "enpgdackc84gpe6dko81" -> null
+      - labels                    = {} -> null
+      - name                      = "diplom" -> null
+      - subnet_ids                = [
+          - "e2lkraib7m57t0n5v1o2",
+          - "e9bhtdi3o5p8h9fj00dc",
+        ] -> null
+    }
+
+  # yandex_vpc_subnet.diplom-subnet1 will be destroyed
+  - resource "yandex_vpc_subnet" "diplom-subnet1" {
+      - created_at     = "2024-08-11T16:46:28Z" -> null
+      - folder_id      = "b1gl6dqee4o5qromajnb" -> null
+      - id             = "e9bhtdi3o5p8h9fj00dc" -> null
+      - labels         = {} -> null
+      - name           = "diplom-subnet1" -> null
+      - network_id     = "enpgdackc84gpe6dko81" -> null
+      - v4_cidr_blocks = [
+          - "10.0.1.0/24",
+        ] -> null
+      - v6_cidr_blocks = [] -> null
+      - zone           = "ru-central1-a" -> null
+    }
+
+  # yandex_vpc_subnet.diplom-subnet2 will be destroyed
+  - resource "yandex_vpc_subnet" "diplom-subnet2" {
+      - created_at     = "2024-08-11T16:46:27Z" -> null
+      - folder_id      = "b1gl6dqee4o5qromajnb" -> null
+      - id             = "e2lkraib7m57t0n5v1o2" -> null
+      - labels         = {} -> null
+      - name           = "diplom-subnet2" -> null
+      - network_id     = "enpgdackc84gpe6dko81" -> null
+      - v4_cidr_blocks = [
+          - "10.0.2.0/24",
+        ] -> null
+      - v6_cidr_blocks = [] -> null
+      - zone           = "ru-central1-b" -> null
+    }
+
+Plan: 0 to add, 0 to change, 10 to destroy.
+
+Changes to Outputs:
+  - Grafana_Network_Load_Balancer_Address = [
+      - "51.250.34.196",
+    ] -> null
+  - Web_App_Network_Load_Balancer_Address = [
+      - "51.250.43.205",
+    ] -> null
+  - all_vms                               = [
+      - {
+          - ip_external = "89.169.130.245"
+          - ip_internal = "10.0.1.13"
+          - name        = "master"
+        },
+      - {
+          - ip_external = "89.169.160.6"
+          - ip_internal = "10.0.2.31"
+          - name        = "worker-1"
+        },
+      - {
+          - ip_external = "89.169.162.145"
+          - ip_internal = "10.0.2.17"
+          - name        = "worker-2"
+        },
+    ] -> null
+local_file.hosts_cfg_kubespray[0]: Destroying... [id=4c379cd508367c473a801dd25f3afeb7bfbc2918]
+local_file.hosts_cfg_kubespray[0]: Destruction complete after 0s
+yandex_lb_network_load_balancer.nlb-web-app: Destroying... [id=enpoak8qmkog1esob5n2]
+yandex_lb_network_load_balancer.nlb-web-app: Destruction complete after 2s
+yandex_lb_network_load_balancer.nlb-grafana: Destroying... [id=enplhaiut18jk9tl6kva]
+yandex_lb_network_load_balancer.nlb-grafana: Destruction complete after 3s
+yandex_lb_target_group.balancer-group: Destroying... [id=enpufkghtkgb4m91pjka]
+yandex_lb_target_group.balancer-group: Destruction complete after 2s
+yandex_compute_instance.worker[0]: Destroying... [id=epdl2m039p4qcjrqmqlt]
+yandex_compute_instance.worker[1]: Destroying... [id=epdmqkgkg6a9obv8u841]
+yandex_compute_instance.worker[1]: Still destroying... [id=epdmqkgkg6a9obv8u841, 10s elapsed]
+yandex_compute_instance.worker[0]: Still destroying... [id=epdl2m039p4qcjrqmqlt, 10s elapsed]
+yandex_compute_instance.worker[0]: Still destroying... [id=epdl2m039p4qcjrqmqlt, 20s elapsed]
+yandex_compute_instance.worker[1]: Still destroying... [id=epdmqkgkg6a9obv8u841, 20s elapsed]
+yandex_compute_instance.worker[0]: Still destroying... [id=epdl2m039p4qcjrqmqlt, 30s elapsed]
+yandex_compute_instance.worker[1]: Still destroying... [id=epdmqkgkg6a9obv8u841, 30s elapsed]
+yandex_compute_instance.worker[1]: Still destroying... [id=epdmqkgkg6a9obv8u841, 40s elapsed]
+yandex_compute_instance.worker[0]: Still destroying... [id=epdl2m039p4qcjrqmqlt, 40s elapsed]
+yandex_compute_instance.worker[0]: Destruction complete after 47s
+yandex_compute_instance.worker[1]: Still destroying... [id=epdmqkgkg6a9obv8u841, 50s elapsed]
+yandex_compute_instance.worker[1]: Destruction complete after 53s
+yandex_vpc_subnet.diplom-subnet2: Destroying... [id=e2lkraib7m57t0n5v1o2]
+yandex_compute_instance.master[0]: Destroying... [id=fhm4du4coc4ft6u1b175]
+yandex_vpc_subnet.diplom-subnet2: Destruction complete after 3s
+yandex_compute_instance.master[0]: Still destroying... [id=fhm4du4coc4ft6u1b175, 10s elapsed]
+yandex_compute_instance.master[0]: Still destroying... [id=fhm4du4coc4ft6u1b175, 20s elapsed]
+yandex_compute_instance.master[0]: Still destroying... [id=fhm4du4coc4ft6u1b175, 30s elapsed]
+yandex_compute_instance.master[0]: Still destroying... [id=fhm4du4coc4ft6u1b175, 40s elapsed]
+yandex_compute_instance.master[0]: Still destroying... [id=fhm4du4coc4ft6u1b175, 50s elapsed]
+yandex_compute_instance.master[0]: Destruction complete after 55s
+yandex_vpc_subnet.diplom-subnet1: Destroying... [id=e9bhtdi3o5p8h9fj00dc]
+yandex_vpc_subnet.diplom-subnet1: Destruction complete after 3s
+yandex_vpc_network.diplom: Destroying... [id=enpgdackc84gpe6dko81]
+yandex_vpc_network.diplom: Destruction complete after 1s
+
+Destroy complete! Resources: 10 destroyed.
+```
+
+Удалю сервисный аккаунт, статический ключ и S3-bucket:
+
+```bash
+╰─➤terraform destroy -auto-approve
+yandex_iam_service_account.service: Refreshing state... [id=aje7cftietvodb39sfn9]
+yandex_resourcemanager_folder_iam_member.service_editor: Refreshing state... [id=b1gl6dqee4o5qromajnb/editor/serviceAccount:aje7cftietvodb39sfn9]
+yandex_iam_service_account_static_access_key.terraform_service_account_key: Refreshing state... [id=ajekmuv72g6k56r4kk47]
+yandex_storage_bucket.tf-bucket: Refreshing state... [id=lsm-diplom-bucket]
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  - destroy
+
+Terraform will perform the following actions:
+
+  # yandex_iam_service_account.service will be destroyed
+  - resource "yandex_iam_service_account" "service" {
+      - created_at = "2024-08-11T16:38:24Z" -> null
+      - folder_id  = "b1gl6dqee4o5qromajnb" -> null
+      - id         = "aje7cftietvodb39sfn9" -> null
+      - name       = "service" -> null
+    }
+
+  # yandex_iam_service_account_static_access_key.terraform_service_account_key will be destroyed
+  - resource "yandex_iam_service_account_static_access_key" "terraform_service_account_key" {
+      - access_key         = "YCAJEEzR7VH5QJ8PNDhFcsxuD" -> null
+      - created_at         = "2024-08-11T16:38:27Z" -> null
+      - id                 = "ajekmuv72g6k56r4kk47" -> null
+      - secret_key         = (sensitive value) -> null
+      - service_account_id = "aje7cftietvodb39sfn9" -> null
+    }
+
+  # yandex_resourcemanager_folder_iam_member.service_editor will be destroyed
+  - resource "yandex_resourcemanager_folder_iam_member" "service_editor" {
+      - folder_id = "b1gl6dqee4o5qromajnb" -> null
+      - id        = "b1gl6dqee4o5qromajnb/editor/serviceAccount:aje7cftietvodb39sfn9" -> null
+      - member    = "serviceAccount:aje7cftietvodb39sfn9" -> null
+      - role      = "editor" -> null
+    }
+
+  # yandex_storage_bucket.tf-bucket will be destroyed
+  - resource "yandex_storage_bucket" "tf-bucket" {
+      - access_key            = "YCAJEEzR7VH5QJ8PNDhFcsxuD" -> null
+      - bucket                = "lsm-diplom-bucket" -> null
+      - bucket_domain_name    = "lsm-diplom-bucket.storage.yandexcloud.net" -> null
+      - default_storage_class = "STANDARD" -> null
+      - folder_id             = "b1gl6dqee4o5qromajnb" -> null
+      - force_destroy         = true -> null
+      - id                    = "lsm-diplom-bucket" -> null
+      - max_size              = 1073741824 -> null
+      - secret_key            = (sensitive value) -> null
+      - tags                  = {} -> null
+
+      - anonymous_access_flags {
+          - config_read = false -> null
+          - list        = false -> null
+          - read        = false -> null
+        }
+
+      - versioning {
+          - enabled = false -> null
+        }
+    }
+
+Plan: 0 to add, 0 to change, 4 to destroy.
+yandex_resourcemanager_folder_iam_member.service_editor: Destroying... [id=b1gl6dqee4o5qromajnb/editor/serviceAccount:aje7cftietvodb39sfn9]
+yandex_storage_bucket.tf-bucket: Destroying... [id=lsm-diplom-bucket]
+yandex_resourcemanager_folder_iam_member.service_editor: Destruction complete after 4s
+yandex_storage_bucket.tf-bucket: Still destroying... [id=lsm-diplom-bucket, 10s elapsed]
+yandex_storage_bucket.tf-bucket: Destruction complete after 11s
+yandex_iam_service_account_static_access_key.terraform_service_account_key: Destroying... [id=ajekmuv72g6k56r4kk47]
+yandex_iam_service_account_static_access_key.terraform_service_account_key: Destruction complete after 1s
+yandex_iam_service_account.service: Destroying... [id=aje7cftietvodb39sfn9]
+yandex_iam_service_account.service: Destruction complete after 5s
+
+Destroy complete! Resources: 4 destroyed.
+```
+
+Созданные виртуальные машины, сеть, подсети, сервисный аккаунт, статический ключ и S3-bucket удаляются успешно.
+
+Настрою автоматическое применение, удаление и обновление кода Terraform. Для этого воспользуюсь GitHub Actions. Пишу Workflow, который позволит запускать применение и удаление кода Terraform по условиям через события `workflow_dispatch`. При нажатии на кнопку `Run workflow` видим два условия, одно из них при введении `true` запустит создание инфраструктуры, другое при введении `true` запустит её удаление:
+
+![img05_workflow1.png](img/img05_workflow1.png)
+
+Также при `git push` кода Terraform в `main` ветку репозитория запустится автоматическое применение этого кода. Это необходимо для автоматического обновления облачной конфигурации при изменении каких либо ресурсов.
+
+Скриншот работы Workflow при обновлении конфигурации облачной инфраструктуры:
+
+![img06_workflow2.png](img/img06_workflow2.png)
+
+Также с помощью GitHub Actions можно удобно следить за изменением облачной инфраструктуры:
+
+![img07_actions.png](img/img07_actions.png)
+
+[Код Workflow](.github/workflows/terraform-cloud.yml)
+
+~~[Выполненные GitHub Actions](https://github.com/LotsmanSM/DevOps-35-diplom-yc/actions)~~
+
+[Полный код Terraform для создания сервисного аккаунта, статического ключа и S3-bucket](terraform-s3/)
+
+[Полный код Terraform для создания сети, подсетей, виртуальных машин](terraform/)
+
+В ходе выполнения работы код может быть изменен и дополнен.
+
+
+
+
+
+---
+### Создание Kubernetes кластера
+
+На этом этапе необходимо создать [Kubernetes](https://kubernetes.io/ru/docs/concepts/overview/what-is-kubernetes/) кластер на базе предварительно созданной инфраструктуры.   Требуется обеспечить доступ к ресурсам из Интернета.
+
+Это можно сделать двумя способами:
+
+1. Рекомендуемый вариант: самостоятельная установка Kubernetes кластера.  
+   а. При помощи Terraform подготовить как минимум 3 виртуальных машины Compute Cloud для создания Kubernetes-кластера. Тип виртуальной машины следует выбрать самостоятельно с учётом требовании к производительности и стоимости. Если в дальнейшем поймете, что необходимо сменить тип инстанса, используйте Terraform для внесения изменений.  
+   б. Подготовить [ansible](https://www.ansible.com/) конфигурации, можно воспользоваться, например [Kubespray](https://kubernetes.io/docs/setup/production-environment/tools/kubespray/)  
+   в. Задеплоить Kubernetes на подготовленные ранее инстансы, в случае нехватки каких-либо ресурсов вы всегда можете создать их при помощи Terraform.
+2. Альтернативный вариант: воспользуйтесь сервисом [Yandex Managed Service for Kubernetes](https://cloud.yandex.ru/services/managed-kubernetes)  
+  а. С помощью terraform resource для [kubernetes](https://registry.terraform.io/providers/yandex-cloud/yandex/latest/docs/resources/kubernetes_cluster) создать **региональный** мастер kubernetes с размещением нод в разных 3 подсетях      
+  б. С помощью terraform resource для [kubernetes node group](https://registry.terraform.io/providers/yandex-cloud/yandex/latest/docs/resources/kubernetes_node_group)
+  
+Ожидаемый результат:
+
+1. Работоспособный Kubernetes кластер.
+2. В файле `~/.kube/config` находятся данные для доступа к кластеру.
+3. Команда `kubectl get pods --all-namespaces` отрабатывает без ошибок.
+
+---
+### Создание тестового приложения
+
+Для перехода к следующему этапу необходимо подготовить тестовое приложение, эмулирующее основное приложение разрабатываемое вашей компанией.
+
+Способ подготовки:
+
+1. Рекомендуемый вариант:  
+   а. Создайте отдельный git репозиторий с простым nginx конфигом, который будет отдавать статические данные.  
+   б. Подготовьте Dockerfile для создания образа приложения.  
+2. Альтернативный вариант:  
+   а. Используйте любой другой код, главное, чтобы был самостоятельно создан Dockerfile.
+
+Ожидаемый результат:
+
+1. Git репозиторий с тестовым приложением и Dockerfile.
+2. Регистри с собранным docker image. В качестве регистри может быть DockerHub или [Yandex Container Registry](https://cloud.yandex.ru/services/container-registry), созданный также с помощью terraform.
+
+---
+### Подготовка cистемы мониторинга и деплой приложения
+
+Уже должны быть готовы конфигурации для автоматического создания облачной инфраструктуры и поднятия Kubernetes кластера.  
+Теперь необходимо подготовить конфигурационные файлы для настройки нашего Kubernetes кластера.
+
+Цель:
+1. Задеплоить в кластер [prometheus](https://prometheus.io/), [grafana](https://grafana.com/), [alertmanager](https://github.com/prometheus/alertmanager), [экспортер](https://github.com/prometheus/node_exporter) основных метрик Kubernetes.
+2. Задеплоить тестовое приложение, например, [nginx](https://www.nginx.com/) сервер отдающий статическую страницу.
+
+Способ выполнения:
+1. Воспользоваться пакетом [kube-prometheus](https://github.com/prometheus-operator/kube-prometheus), который уже включает в себя [Kubernetes оператор](https://operatorhub.io/) для [grafana](https://grafana.com/), [prometheus](https://prometheus.io/), [alertmanager](https://github.com/prometheus/alertmanager) и [node_exporter](https://github.com/prometheus/node_exporter). Альтернативный вариант - использовать набор helm чартов от [bitnami](https://github.com/bitnami/charts/tree/main/bitnami).
+
+2. Если на первом этапе вы не воспользовались [Terraform Cloud](https://app.terraform.io/), то задеплойте и настройте в кластере [atlantis](https://www.runatlantis.io/) для отслеживания изменений инфраструктуры. Альтернативный вариант 3 задания: вместо Terraform Cloud или atlantis настройте на автоматический запуск и применение конфигурации terraform из вашего git-репозитория в выбранной вами CI-CD системе при любом комите в main ветку. Предоставьте скриншоты работы пайплайна из CI/CD системы.
+
+Ожидаемый результат:
+1. Git репозиторий с конфигурационными файлами для настройки Kubernetes.
+2. Http доступ к web интерфейсу grafana.
+3. Дашборды в grafana отображающие состояние Kubernetes кластера.
+4. Http доступ к тестовому приложению.
+
+---
+### Установка и настройка CI/CD
+
+Осталось настроить ci/cd систему для автоматической сборки docker image и деплоя приложения при изменении кода.
+
+Цель:
+
+1. Автоматическая сборка docker образа при коммите в репозиторий с тестовым приложением.
+2. Автоматический деплой нового docker образа.
+
+Можно использовать [teamcity](https://www.jetbrains.com/ru-ru/teamcity/), [jenkins](https://www.jenkins.io/), [GitLab CI](https://about.gitlab.com/stages-devops-lifecycle/continuous-integration/) или GitHub Actions.
+
+Ожидаемый результат:
+
+1. Интерфейс ci/cd сервиса доступен по http.
+2. При любом коммите в репозиторие с тестовым приложением происходит сборка и отправка в регистр Docker образа.
+3. При создании тега (например, v1.0.0) происходит сборка и отправка с соответствующим label в регистри, а также деплой соответствующего Docker образа в кластер Kubernetes.
+
+---
+## Что необходимо для сдачи задания?
+
+1. Репозиторий с конфигурационными файлами Terraform и готовность продемонстрировать создание всех ресурсов с нуля.
+2. Пример pull request с комментариями созданными atlantis'ом или снимки экрана из Terraform Cloud или вашего CI-CD-terraform pipeline.
+3. Репозиторий с конфигурацией ansible, если был выбран способ создания Kubernetes кластера при помощи ansible.
+4. Репозиторий с Dockerfile тестового приложения и ссылка на собранный docker image.
+5. Репозиторий с конфигурацией Kubernetes кластера.
+6. Ссылка на тестовое приложение и веб интерфейс Grafana с данными доступа.
+7. Все репозитории рекомендуется хранить на одном ресурсе (github, gitlab)
+
