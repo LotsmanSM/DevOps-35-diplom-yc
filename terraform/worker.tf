@@ -1,6 +1,6 @@
 variable "os_image_worker" {
   type    = string
-  default = "ubuntu-2004-lts"
+  default = "ubuntu-2204-lts"
 }
 
 data "yandex_compute_image" "ubuntu-worker" {
