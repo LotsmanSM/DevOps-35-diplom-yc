@@ -16,17 +16,10 @@ packages:
   - curl
   - gnupg
   - lsb-release
-#  - unattended-upgrades
+  - unattended-upgrades
 
 runcmd:
   - curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
   - chmod 700 get_helm.sh
   - ./get_helm.sh
-#  - mkdir archives
-#  - cd archives
-#  - export etcdVersion=v3.5.12
-#  - wget https://github.com/coreos/etcd/releases/download/$etcdVersion/etcd-$etcdVersion-linux-amd64.tar.gz
-#  - tar -xvf etcd-$etcdVersion-linux-amd64.tar.gz -C /usr/local/bin/ --strip-components=1
-#  - cd ..
-#  - ./create-config.sh etcd
-#  - systemctl start etcd
+
