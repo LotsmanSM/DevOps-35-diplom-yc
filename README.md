@@ -1707,11 +1707,10 @@ all:
     master:
       ansible_host: ${master.network_interface[0].nat_ip_address}
       ip: ${master.network_interface[0].ip_address}
-      access_ip: ${master.network_interface[0].ip_address}%{ endfor }%{ for idx, worker in workers }
+      kube_apiserver_ip: ${master.network_interface[0].nat_ip_address}%{ endfor }%{ for idx, worker in workers }
     worker-${idx + 1}:
       ansible_host: ${worker.network_interface[0].nat_ip_address}
-      ip: ${worker.network_interface[0].ip_address}
-      access_ip: ${worker.network_interface[0].ip_address}%{ endfor }
+      ip: ${worker.network_interface[0].ip_address}%{ endfor }
   children:
     kube_control_plane:
       hosts:%{ for idx, master in masters }
@@ -2074,9 +2073,13 @@ b90d53c29dae: Mounted from library/nginx
 
 
 
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+"prometheus-community" has been added to your repositories
 
-
-
+helm repo update
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "prometheus-community" chart repository
+Update Complete. ⎈Happy Helming!⎈
 
 
 
