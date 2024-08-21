@@ -2071,45 +2071,290 @@ b90d53c29dae: Mounted from library/nginx
 
 ### Выполнение этапа "Подготовка cистемы мониторинга и деплой приложения":
 
+Для удобства управления созданным Kubernetes кластером, скопирую его конфигурационный файл на свою рабочую машину и заменю IP адрес сервера:
 
+```bash
+╰─➤scp ubuntu@89.169.143.190:~/.kube/config ~/.kube
+config                                                                                                                    100% 5665   466.9KB/s   00:00    
+```
 
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+![img12_kubectl_srv.png](img/img12_kubectl_srv.png)
+
+Проверю результат:
+
+```bash
+╰─➤kubectl get nodes 
+NAME       STATUS   ROLES           AGE   VERSION
+master     Ready    control-plane   32m   v1.30.3
+worker-1   Ready    <none>          31m   v1.30.3
+worker-2   Ready    <none>          31m   v1.30.3
+```
+
+Kubernetes кластер доступен с рабочей машины.
+
+Установлю `helm` на свою рабочую машину:
+
+```bash
+╰─➤curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+
+╰─➤chmod 700 get_helm.sh
+
+╰─➤./get_helm.sh
+Downloading https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz
+Verifying checksum... Done.
+Preparing to install helm into /usr/local/bin
+[sudo] пароль для serg: 
+helm installed into /usr/local/bin/helm
+
+╰─➤helm completion bash > /etc/bash_completion.d/helm
+```
+
+Добавлю репозиторий `prometheus-community`, установку произведу с помощью `helm`:
+
+```bash
+╰─➤helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 "prometheus-community" has been added to your repositories
 
-helm repo update
+╰─➤helm repo update
 Hang tight while we grab the latest from your chart repositories...
 ...Successfully got an update from the "prometheus-community" chart repository
 Update Complete. ⎈Happy Helming!⎈
+```
+
+Для доступа к Grafana снаружи кластера Kubernetes буду использовать тип сервиса `NodePort`.
+
+Сохраню значения по умолчанию Helm чарта `prometheus-community` в файл и отредактирую его:
+
+```helm show values prometheus-community/kube-prometheus-stack > helm-prometheus/values.yaml```
+
+```bash
+╰─➤mkdir helm-prometheus
+
+╰─➤helm show values prometheus-community/kube-prometheus-stack > helm-prometheus/values.yaml
+```
+
+Изменю пароль по умолчанию для входа в Grafana:
+
+![img13_values_adminPassword.png](img/img13_values_adminPassword.png)
+
+Изменю сервис и присвою ему порт 30050:
+
+![img14_values_port.png](img/img14_values_port.png)
+
+```
+grafana:
+  service:
+    portName: http-web
+    type: NodePort
+    nodePort: 30050
+```
+
+Используя Helm и подготовленный файл значений `values.yaml` выполню установку `prometheus-community`:
+
+```bash
+╰─➤helm upgrade --install monitoring prometheus-community/kube-prometheus-stack --create-namespace -n monitoring -f helm-prometheus/values.yaml
+Release "monitoring" does not exist. Installing it now.
+NAME: monitoring
+LAST DEPLOYED: Wed Aug 21 21:19:37 2024
+NAMESPACE: monitoring
+STATUS: deployed
+REVISION: 1
+NOTES:
+kube-prometheus-stack has been installed. Check its status by running:
+  kubectl --namespace monitoring get pods -l "release=monitoring"
+
+Visit https://github.com/prometheus-operator/kube-prometheus for instructions on how to create & configure Alertmanager and Prometheus instances using the Operator.
+```
+
+При установке был создан отдельный Namespace с названием `monitoring`.
+
+Проверю результат установки:
+
+```bash
+╰─➤kubectl -n monitoring get pods -o wide
+NAME                                                     READY   STATUS    RESTARTS   AGE     IP               NODE       NOMINATED NODE   READINESS GATES
+alertmanager-monitoring-kube-prometheus-alertmanager-0   2/2     Running   0          2m35s   10.233.72.196    worker-2   <none>           <none>
+monitoring-grafana-9d859d4d4-js95l                       3/3     Running   0          2m43s   10.233.72.195    worker-2   <none>           <none>
+monitoring-kube-prometheus-operator-58c57dc754-q7ggv     1/1     Running   0          2m43s   10.233.105.194   worker-1   <none>           <none>
+monitoring-kube-state-metrics-58fd4447c6-7vx84           1/1     Running   0          2m43s   10.233.105.195   worker-1   <none>           <none>
+monitoring-prometheus-node-exporter-dk4pv                1/1     Running   0          2m44s   10.0.1.20        master     <none>           <none>
+monitoring-prometheus-node-exporter-gqzm7                1/1     Running   0          2m44s   10.0.2.27        worker-1   <none>           <none>
+monitoring-prometheus-node-exporter-mx6gw                1/1     Running   0          2m44s   10.0.2.34        worker-2   <none>           <none>
+prometheus-monitoring-kube-prometheus-prometheus-0       2/2     Running   0          2m35s   10.233.105.197   worker-1   <none>           <none>
+
+╰─➤kubectl -n monitoring get svc -o wide
+NAME                                      TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE     SELECTOR
+alertmanager-operated                     ClusterIP   None            <none>        9093/TCP,9094/TCP,9094/UDP   3m30s   app.kubernetes.io/name=alertmanager
+monitoring-grafana                        NodePort    10.233.29.63    <none>        80:30050/TCP                 3m39s   app.kubernetes.io/instance=monitoring,app.kubernetes.io/name=grafana
+monitoring-kube-prometheus-alertmanager   ClusterIP   10.233.16.88    <none>        9093/TCP,8080/TCP            3m39s   alertmanager=monitoring-kube-prometheus-alertmanager,app.kubernetes.io/name=alertmanager
+monitoring-kube-prometheus-operator       ClusterIP   10.233.19.151   <none>        443/TCP                      3m39s   app=kube-prometheus-stack-operator,release=monitoring
+monitoring-kube-prometheus-prometheus     ClusterIP   10.233.52.215   <none>        9090/TCP,8080/TCP            3m39s   app.kubernetes.io/name=prometheus,operator.prometheus.io/name=monitoring-kube-prometheus-prometheus
+monitoring-kube-state-metrics             ClusterIP   10.233.62.101   <none>        8080/TCP                     3m39s   app.kubernetes.io/instance=monitoring,app.kubernetes.io/name=kube-state-metrics
+monitoring-prometheus-node-exporter       ClusterIP   10.233.47.25    <none>        9100/TCP                     3m39s   app.kubernetes.io/instance=monitoring,app.kubernetes.io/name=prometheus-node-exporter
+prometheus-operated                       ClusterIP   None            <none>        9090/TCP                     3m30s   app.kubernetes.io/name=prometheus
+```
+
+Установка была выполнена с заданными в `values.yaml` значениями.
+
+Файл значений `values.yaml`, использованный при установке `prometheus-community` доступен по ссылке: https://github.com/DemoniumBlack/fedorchukds-devops-33-56/blob/main/helm-prometheus/values.yaml
+
+Открою web-интерфейс Grafana:
+
+![img15_web_grafana1.png](img/img15_web_grafana1.png)
+
+Авторизуюсь в Grafana с заранее заданным в `values.yaml` паролем:
+
+![img15_web_grafana2.png](img/img15_web_grafana2.png)
+
+Авторизация проходит успешно, данные о состоянии кластера отображаются на дашбордах:
+
+![img15_web_grafana3.png](img/img15_web_grafana3.png)
+
+Развёртывание системы мониторинга успешно завершено.
+
+Приступаю к развёртыванию тестового приложения на Kubernetes кластере.
+
+Создаю отдельный Namespace, в котором буду развёртывать тестовое приложение:
+
+```bash
+╰─➤mkdir k8s-app
+
+╰─➤kubectl create namespace diplom-site
+namespace/diplom-site created
+```
+
+Пишу манифест Deployment с тестовым приложением:
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: diplom-app
+  namespace: diplom-site
+  labels:
+    app: web-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      containers:
+      - name: diplom-test-site
+        image: lotsmansm/diplom-test-site:0.1
+        resources:
+          requests:
+            cpu: "1"
+            memory: "200Mi"
+          limits:
+            cpu: "2"
+            memory: "400Mi"
+        ports:
+        - containerPort: 80
+```
+
+Применю манифест Deployment и проверю результат:
+
+```bash
+╰─➤kubectl apply -n diplom-site -f deployment.yaml
+deployment.apps/diplom-app created
+
+╰─➤kubectl -n diplom-site get deployment
+NAME         READY   UP-TO-DATE   AVAILABLE   AGE
+diplom-app   2/2     2            2           72s
+```
+
+Deployment создан и запущен. Проверю его работу:
+
+```bash
+╰─➤kubectl -n diplom-site exec -it diplom-app-695fcc7676-dbtgv -c diplom-test-site -- /bin/bash
+root@diplom-app-695fcc7676-dbtgv:/# curl localhost
+<html>
+    <head>
+        <title>Tools DevOps</title>
+        <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+        <meta name="title" content="Tools DevOps">
+        <meta name="author" content="Lotsman SM">
+        <meta name="description" content="DevOps-Dark">
+    </head>
+    <body>
+        <h1>Tools DevOps</h1>
+        <img src="DevOps-Dark.png"/>
+    </body>
+</html>
+root@diplom-app-695fcc7676-dbtgv:/# 
+```
+
+Приложение работает.
+
+[Ссылка на манифест Deployment](k8s-app/deployment.yaml)
+
+Пишу манифест сервиса с типом NodePort для доступа к web-интерфейсу тестового приложения:
+
+```
+apiVersion: v1
+kind: Service
+metadata:
+  name: diplom-site-service
+  namespace: diplom-site
+spec:
+  type: NodePort
+  selector:
+    app: web-app
+  ports:
+  - protocol: TCP
+    port: 80
+    nodePort: 30051
+```
+
+Применю манифест сервиса и проверю результат:
+
+```bash
+╰─➤kubectl apply -n diplom-site -f service.yaml 
+service/diplom-site-service created
 
 
+╰─➤kubectl -n diplom-site get svc -o wide
+NAME                  TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE   SELECTOR
+diplom-site-service   NodePort   10.233.48.147   <none>        80:30051/TCP   35s   app=web-app
+```
 
+Сервис создан. Теперь проверю доступ к приложению извне:
 
+![img16_web_site.png](img/img16_web_site.png)
 
+Сайт открывается, приложение доступно.
 
+[Ссылка на манифест service](k8s-app/service.yaml)
 
+Поскольку в манифесте Deployments я указал две реплики приложения для обеспечения его отказоустойчивости, мне потребуется балансировщик нагрузки.
 
+Пишу код Terraform для создания балансировщика нагрузки. Создается группа балансировщика нагрузки, которая будет использоваться для балансировки нагрузки между экземплярами. Создается балансировщик с именем grafana, определяется слушатель на порту 3000, который перенаправляет трафик на порт 30050 целевого узла, настраивается проверка работоспособности (healthcheck) на порту 30050.
+Также создается балансировщик с именем web-app, определяется слушатель на порту 80, который перенаправляет трафик на порт 30051 целевого узла, настраивается проверка работоспособности (healthcheck) на порту 30051.
 
+[Ссылка на код Terraform балансировщика нагрузки](terraform/load-balancer.tf)
 
+После применения балансировщика нагрузки к облачной инфраструктуре Outputs выглядит следующим образом:
 
+![img17_terraform_outputs.png](img/img17_terraform_outputs.png)
 
+Проверю работу балансировщика нагрузки. Тестовое приложение будет открываться по порту 80, а Grafana будет открываться по порту 3000:
 
+* Тестовое приложение:
 
+![img18_test_app.png](img/img18_test_app.png)
 
+* Grafana:
 
+![img19_web_grafana_pod.png](img/img19_web_grafana_pod.png)
 
+Также видно, что в Grafana отобразился созданный Namespace и Deployment с подами.
 
-
-
-
-
-
-
-
-
-
-
-
-
+Развёртывание системы мониторинга и тестового приложения завершено.
 
 ---
 ### Установка и настройка CI/CD
