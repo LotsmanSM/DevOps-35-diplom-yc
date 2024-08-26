@@ -2125,8 +2125,6 @@ Update Complete. ⎈Happy Helming!⎈
 
 Сохраню значения по умолчанию Helm чарта `prometheus-community` в файл и отредактирую его:
 
-```helm show values prometheus-community/kube-prometheus-stack > helm-prometheus/values.yaml```
-
 ```bash
 ╰─➤mkdir helm-prometheus
 
@@ -2374,14 +2372,210 @@ diplom-site-service   NodePort   10.233.48.147   <none>        80:30051/TCP   35
 2. При любом коммите в репозиторие с тестовым приложением происходит сборка и отправка в регистр Docker образа.
 3. При создании тега (например, v1.0.0) происходит сборка и отправка с соответствующим label в регистри, а также деплой соответствующего Docker образа в кластер Kubernetes.
 
+
+### Выполнение этапа "Установка и настройка CI/CD":
+
+Для организации процессов CI/CD буду использовать GitHub Actions, который для работы требуют учетные данные.
+
+Поэтому создам в Dockerhub секретный токен.
+
+Затем создаю github секреты для доступа к DockerHub: 'KUBE_CONFIG_DATA' 'DOCKERHUB_TOKEN' и 'DOCKERHUB_USERNAME'
+
+Пишу 'workflows' [production_deployment.yml](https://github.com/LotsmanSM/DevOps-35-diplom-test-site/blob/main/.github/workflows/production_deployment.yml) 
+
+При любом коммите в репозиторие с тестовым приложением происходит сборка и отправка в регистр Docker образа.
+
+```
+name: k8s
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+env:
+  IMAGE_TAG: lotsmansm/diplom-test-site
+  RELEASE_NAME: diplom-test-site
+  NAMESPACE: diplom-site
+
+jobs:
+  build-and-push:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract version from commit messages
+        run: |
+          VERSION=$(git log -1 --pretty=format:%B)
+          if [[ ! -z "$VERSION" ]]; then
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          else
+            echo "No version found in the commit message"
+            exit 1
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_TAG }}:${{ env.VERSION }}
+
+  deploy:
+    needs: build-and-push
+    name: Deploy to Kubernetes
+    if: startsWith(github.ref, 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Kubernetes
+        uses: azure/setup-kubectl@v1
+        with:
+          version: 'v1.21.0'
+
+      - name: Extract version from commit messages
+        run: |
+          VERSION=$(git log -1 --pretty=format:%B)
+          if [[ ! -z "$VERSION" ]]; then
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          else
+            echo "No version found in the commit message"
+            exit 1
+          fi
+
+      - name: Replace image tag in deploy.yaml
+        if: env.DEPLOY == 'false'
+       
+        run: |
+          sed -i "s|image: lotsmansm/diplom-test-site:.*|image: ${{ env.IMAGE_TAG }}|" ./k8s/deployment.yaml ./k8s/service.yaml
+        env:
+          IMAGE_TAG: lotsmansm/diplom-test-site:${{ env.VERSION }}
+      
+      - name: Create kubeconfig
+        run: |
+          mkdir -p $HOME/.kube/
+      - name: Authenticate to Kubernetes cluster
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          echo "${KUBE_CONFIG_DATA}" > ${HOME}/.kube/config
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f ./k8s/deployment.yaml
+          kubectl apply -f ./k8s/service.yaml
+
+```
+
+При создании тега (например, v0.2.5) происходит сборка и отправка с соответствующим label в регистри, а также деплой соответствующего Docker образа в кластер Kubernetes.
+
+```bash
+╰─➤git add .
+
+╰─➤git commit -m '0.2.5'
+[main 73a50ae] 0.2.5
+ 2 files changed, 2 insertions(+), 15 deletions(-)
+
+╰─➤git push
+```
+
+![img20_github.png](img/img20_github.png)
+
+![img21_dockerhub.png](img/img21_dockerhub.png)
+
+
+```bash
+╰─➤kubectl get pods -n diplom-site 
+NAME                          READY   STATUS    RESTARTS   AGE
+diplom-app-695fcc7676-67b7d   1/1     Running   0          25m
+diplom-app-695fcc7676-6g4bk   1/1     Running   0          25m
+
+╰─➤kubectl get pods -n monitoring 
+NAME                                                     READY   STATUS    RESTARTS   AGE
+alertmanager-monitoring-kube-prometheus-alertmanager-0   2/2     Running   0          27m
+monitoring-grafana-6f86f486c5-v4s2p                      3/3     Running   0          27m
+monitoring-kube-prometheus-operator-6cb8cc898-b7fsl      1/1     Running   0          27m
+monitoring-kube-state-metrics-58fd4447c6-v6kql           1/1     Running   0          27m
+monitoring-prometheus-node-exporter-f9dqd                1/1     Running   0          27m
+monitoring-prometheus-node-exporter-k6gpq                1/1     Running   0          27m
+monitoring-prometheus-node-exporter-zfjrp                1/1     Running   0          27m
+prometheus-monitoring-kube-prometheus-prometheus-0       2/2     Running   0          27m
+
+╰─➤kubectl describe pod diplom-app-695fcc7676-67b7d -n diplom-site 
+Name:             diplom-app-695fcc7676-67b7d
+Namespace:        diplom-site
+Priority:         0
+Service Account:  default
+Node:             worker-2/10.0.2.3
+Start Time:       Mon, 26 Aug 2024 21:48:35 +0300
+Labels:           app=web-app
+                  pod-template-hash=695fcc7676
+Annotations:      cni.projectcalico.org/containerID: 1e8485d7c4e063009d5b9199fa824df481993256ca5214a55b08e5bbf85ceaee
+                  cni.projectcalico.org/podIP: 10.233.72.196/32
+                  cni.projectcalico.org/podIPs: 10.233.72.196/32
+Status:           Running
+IP:               10.233.72.196
+IPs:
+  IP:           10.233.72.196
+Controlled By:  ReplicaSet/diplom-app-695fcc7676
+Containers:
+  diplom-test-site:
+    Container ID:   containerd://e8019823033e2dc165331b72536250634c21d14eae1eb49d4a2b3299d6aaca77
+    Image:          lotsmansm/diplom-test-site:0.1
+    Image ID:       docker.io/lotsmansm/diplom-test-site@sha256:fdb5a1bfdf8d588a5bf43e0ae2fcfb6a890e210ce47fb0506117c31ef3933bf6
+    Port:           80/TCP
+    Host Port:      0/TCP
+    State:          Running
+      Started:      Mon, 26 Aug 2024 21:48:44 +0300
+    Ready:          True
+    Restart Count:  0
+    Limits:
+      cpu:     2
+      memory:  400Mi
+    Requests:
+      cpu:        1
+      memory:     200Mi
+    Environment:  <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-82868 (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       True 
+  ContainersReady             True 
+  PodScheduled                True 
+Volumes:
+  kube-api-access-82868:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   Burstable
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type    Reason     Age   From               Message
+  ----    ------     ----  ----               -------
+  Normal  Scheduled  28m   default-scheduler  Successfully assigned diplom-site/diplom-app-695fcc7676-67b7d to worker-2
+  Normal  Pulling    28m   kubelet            Pulling image "lotsmansm/diplom-test-site:0.1"
+  Normal  Pulled     28m   kubelet            Successfully pulled image "lotsmansm/diplom-test-site:0.1" in 7.626s (7.626s including waiting). Image size: 71207887 bytes.
+  Normal  Created    28m   kubelet            Created container diplom-test-site
+  Normal  Started    28m   kubelet            Started container diplom-test-site
+```
+
 ---
-## Что необходимо для сдачи задания?
-
-1. Репозиторий с конфигурационными файлами Terraform и готовность продемонстрировать создание всех ресурсов с нуля.
-2. Пример pull request с комментариями созданными atlantis'ом или снимки экрана из Terraform Cloud или вашего CI-CD-terraform pipeline.
-3. Репозиторий с конфигурацией ansible, если был выбран способ создания Kubernetes кластера при помощи ansible.
-4. Репозиторий с Dockerfile тестового приложения и ссылка на собранный docker image.
-5. Репозиторий с конфигурацией Kubernetes кластера.
-6. Ссылка на тестовое приложение и веб интерфейс Grafana с данными доступа.
-7. Все репозитории рекомендуется хранить на одном ресурсе (github, gitlab)
-
